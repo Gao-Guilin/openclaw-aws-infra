@@ -46,7 +46,6 @@ project-evidence/
 infra/envs/dev/phase1-outputs.json
 
 # Initial private repository scope
-docs/
 demo/
 
 # Terraform-generated Lambda packages
