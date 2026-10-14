@@ -131,14 +131,14 @@ docker build -t openclaw-aws-agent:local ./openclaw-agent
 - [Architecture](docs/architecture.md)
 - [Deployment & Setup](docs/deployment.md)
 - [CI/CD & GitHub OIDC](docs/ci-cd.md)
-- Security & IAM Design — planned
-- Operations & Job Lifecycle — planned
-- Skills & Report Pipeline — planned
-- Incident & Troubleshooting Records — planned
-- Changes & Architecture Decisions — planned
-- Validation & Evidence — planned
-- Limitations & Known Constraints — planned
-- Documentation Index & Quick Start — planned
+- [Security & IAM Design](docs/security-iam.md)
+- [Operations & Job Lifecycle](docs/operations-lifecycle.md)
+- [Skills & Report Pipeline](docs/skills-reporting.md)
+- [Incident & Troubleshooting Records](docs/incidents.md)
+- [Changes & Architecture Decisions](docs/changes-decisions.md)
+- [Validation & Evidence](docs/validation-evidence.md)
+- [Limitations & Known Constraints](docs/limitations.md)
+- [Documentation Index & Quick Start](docs/index.md)
 
 ## Project scope
 
