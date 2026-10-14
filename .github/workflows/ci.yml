@@ -1,0 +1,107 @@
+name: OpenClaw CI
+
+on:
+  push:
+    branches:
+      - main
+      - "ci/**"
+      - "feature/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openclaw-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  repository-safety:
+    name: Repository Safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - name: Reject forbidden tracked files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          forbidden_regex='(^|/)(terraform\.tfstate(\..*)?|[^/]*\.tfplan|terraform\.tfvars|\.env(\..*)?|[^/]*\.(pem|key|secret)|authorizer\.zip|job_receiver\.zip)$'
+          matches="$(git ls-files | grep -E "${forbidden_regex}" || true)"
+          [[ -z "${matches}" ]] || { printf '%s\n' "${matches}"; exit 1; }
+      - name: Scan tracked files for credential signatures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          credential_regex='AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{80,255}|-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'
+          matches="$(git grep -Il -E "${credential_regex}" -- . || true)"
+          [[ -z "${matches}" ]] || { printf '%s\n' "${matches}"; exit 1; }
+
+  terraform-validation:
+    name: Terraform dev/prod Validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Validate Terraform
+        run: ./infra/scripts/validate.sh
+
+  code-tests:
+    name: Python, Shell and Agent Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/venv"
+          "${RUNNER_TEMP}/venv/bin/pip" install --disable-pip-version-check \
+            pytest \
+            -r openclaw-agent/requirements.txt
+      - name: Compile Python
+        run: |
+          "${RUNNER_TEMP}/venv/bin/python" -m compileall -q \
+            openclaw-agent \
+            infra/modules/lambda/tests
+      - name: Run all Python tests
+        run: |
+          "${RUNNER_TEMP}/venv/bin/python" -m pytest -q \
+            openclaw-agent/tests \
+            infra/modules/lambda/tests
+      - name: Run shell checks
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          find . -type f -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
+          find . -type f -name '*.sh' -not -path './.git/*' -print0 | xargs -0 shellcheck -x -S error
+      - name: Verify checks did not modify tracked files
+        run: git diff --exit-code
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - name: Build OpenClaw Agent image
+        run: docker build --tag openclaw-aws-agent:ci ./openclaw-agent

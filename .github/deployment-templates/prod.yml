@@ -1,0 +1,122 @@
+name: Plan Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_image_digest:
+        description: "Digest already validated in dev (sha256:...)"
+        required: true
+        type: string
+      enable_schedulers:
+        description: "Enable the three real prod schedules in this release"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-northeast-1
+  AWS_ACCOUNT_ID: "000000000000"
+  AWS_PLAN_ROLE_ARN: arn:aws:iam::000000000000:role/openclaw-aws-prod-plan-role
+  DEV_ECR_REPOSITORY: openclaw-aws-dev-agent
+  PROD_ECR_REPOSITORY: openclaw-aws-prod-agent
+  TF_STATE_BUCKET: openclaw-aws-terraform-state-000000000000-ap-northeast-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+concurrency:
+  group: openclaw-plan-prod
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Promote artifact and build reviewable prod plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Assume read-only prod Plan role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c
+        with:
+          role-to-assume: ${{ env.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: prod-plan-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64
+      - name: Promote the exact dev image to prod ECR
+        id: promote
+        shell: bash
+        env:
+          DIGEST: ${{ inputs.source_image_digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid digest"; exit 1; }
+          dev_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR_REPOSITORY}@${DIGEST}"
+          prod_tag="release-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          prod_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${PROD_ECR_REPOSITORY}:${prod_tag}"
+          docker pull "${dev_uri}"
+          docker tag "${dev_uri}" "${prod_uri}"
+          docker push "${prod_uri}"
+          prod_digest="$(aws ecr describe-images --repository-name "${PROD_ECR_REPOSITORY}" --image-ids "imageTag=${prod_tag}" --query 'imageDetails[0].imageDigest' --output text)"
+          [[ "${prod_digest}" == "${DIGEST}" ]] || { echo "Digest changed during promotion"; exit 1; }
+          echo "digest=${prod_digest}" >> "${GITHUB_OUTPUT}"
+      - name: Build prod Terraform plan
+        id: plan
+        env:
+          TF_VAR_agent_image_digest: ${{ steps.promote.outputs.digest }}
+          TF_VAR_agent_image_uri_override: ""
+          TF_VAR_eventbridge_scheduler_enabled: ${{ inputs.enable_schedulers }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          artifact_dir="${RUNNER_TEMP}/prod-plan-artifact"
+          mkdir -p "${artifact_dir}"
+          terraform -chdir=infra/envs/prod init -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=envs/prod/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=infra/envs/prod plan -input=false -out="${artifact_dir}/prod.tfplan"
+          terraform -chdir=infra/envs/prod show -no-color "${artifact_dir}/prod.tfplan" > "${artifact_dir}/prod-plan.txt"
+          (
+            cd "${artifact_dir}"
+            sha256sum prod.tfplan > prod-plan.sha256
+          )
+          cat > "${artifact_dir}/metadata.env" <<META
+          SOURCE_COMMIT=${GITHUB_SHA}
+          SOURCE_IMAGE_DIGEST=${{ steps.promote.outputs.digest }}
+          ENABLE_SCHEDULERS=${{ inputs.enable_schedulers }}
+          PLAN_SHA256=$(cut -d' ' -f1 "${artifact_dir}/prod-plan.sha256")
+          PLAN_RUN_ID=${GITHUB_RUN_ID}
+          META
+          echo "plan_sha256=$(cut -d' ' -f1 "${artifact_dir}/prod-plan.sha256")" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prod-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/prod-plan-artifact
+          retention-days: 7
+      - name: Plan summary
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF_SUMMARY
+          ## prod plan ready for manual review
+          - Plan run ID: ${GITHUB_RUN_ID}
+          - Commit: ${GITHUB_SHA}
+          - Promoted digest: ${{ steps.promote.outputs.digest }}
+          - Scheduler enabled: ${{ inputs.enable_schedulers }}
+          - Plan role: ${AWS_PLAN_ROLE_ARN}
+          - Plan SHA-256: ${{ steps.plan.outputs.plan_sha256 }}
+
+          Download and review prod-plan-${GITHUB_RUN_ID}/prod-plan.txt. Only after approval, manually run **Apply Prod** with this run ID and confirmation APPLY-PROD.
+          EOF_SUMMARY

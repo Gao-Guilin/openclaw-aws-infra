@@ -1,0 +1,25 @@
+# Git
+.git/
+.gitignore
+
+# Local env / secrets
+.env
+.env.*
+*.secret
+*.pem
+*.key
+
+# Local OpenClaw runtime files
+openclaw.json
+.openclaw/
+memory/
+storage/
+workspace/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+logs/

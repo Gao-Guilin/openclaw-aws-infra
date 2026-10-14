@@ -1,0 +1,65 @@
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets / env
+.env
+.env.*
+*.secret
+*.pem
+*.key
+
+# OpenClaw runtime / local config
+openclaw.json
+.openclaw/
+memory/
+storage/
+workspace/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+crash.log
+crash.*.log
+
+# Logs
+*.log
+logs/
+
+# Local evidence exports
+project-evidence/
+
+
+# Terraform plan and local output artifacts
+*.tfplan
+infra/envs/dev/phase1-outputs.json
+
+# Initial private repository scope
+docs/
+demo/
+
+# Terraform-generated Lambda packages
+infra/modules/lambda/job_receiver.zip
+infra/modules/lambda/authorizer.zip
+
+# Local Terraform backend configuration
+*.tfbackend
+*.tfbackend.*
+
+# Local Terraform audit exports and generated deployment evidence
+infra/envs/*/*-plan.txt
+infra/envs/*/terraform-output.json
+infra/envs/*/terraform-providers.txt
+infra/envs/*/terraform-state-list.txt
+openclaw-evidence/

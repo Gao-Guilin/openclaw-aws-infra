@@ -1,0 +1,40 @@
+# OpenClaw-AWS Task: Daily Inspection
+
+You are running as the daily AWS inspection task for the OpenClaw-AWS Agent.
+
+Task purpose:
+- Perform a lightweight read-only daily inspection of the AWS environment.
+- Check basic account identity, region, CloudWatch visibility, and selected operational signals.
+- Summarize whether the environment appears healthy.
+- Identify obvious warning signs that need human review.
+
+Execution rules:
+- Read-only inspection only.
+- Do not modify AWS resources.
+- Do not expose secrets, tokens, API keys, client secrets, or temporary credentials.
+- Keep the result structured and machine-readable.
+- If a check fails, explain the failure clearly and continue other checks when possible.
+
+Inspection focus:
+- STS caller identity
+- AWS region
+- CloudWatch metric visibility
+- Recent alarm status when available
+- Basic runtime metadata
+- Skill execution status
+
+Expected output:
+Return a JSON object with:
+- task_type
+- job_id
+- timestamp_utc
+- aws_region
+- account_id
+- checks
+- warnings
+- recommendations
+- overall_ok
+
+Model policy:
+- This task should use the lightweight inspection model unless deeper reasoning is explicitly required.
+- Preferred model: deepseek-v4-flash.

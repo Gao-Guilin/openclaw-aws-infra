@@ -1,0 +1,32 @@
+# OpenClaw-AWS dev environment example configuration.
+#
+# Terraform does not automatically load this file because its suffix is
+# ".example". The current dev deployment uses the default values declared
+# in variables.tf.
+
+aws_region   = "ap-northeast-1"
+project_name = "openclaw-aws"
+environment  = "dev"
+
+vpc_cidr = "10.20.0.0/16"
+
+public_subnet_cidrs = [
+  "10.20.1.0/24",
+  "10.20.2.0/24"
+]
+
+monthly_budget_limit_usd = 10
+
+additional_tags = {
+  Purpose = "portfolio"
+  Phase   = "phase-4"
+}
+
+
+# GitHub Actions basic CD trust scope.
+github_repository = "YOUR_GITHUB_OWNER/openclaw-aws"
+
+github_cd_branch_patterns = [
+  "main",
+  "cd/*"
+]

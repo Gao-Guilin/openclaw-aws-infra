@@ -1,0 +1,52 @@
+# Copy to a private local terraform.tfvars only when required. Never commit secrets.
+aws_region   = "ap-northeast-1"
+project_name = "openclaw-aws"
+environment  = "prod"
+
+vpc_cidr = "10.30.0.0/16"
+public_subnet_cidrs = [
+  "10.30.1.0/24",
+  "10.30.2.0/24"
+]
+
+monthly_budget_limit_usd = 15
+cloudwatch_log_retention_days = 7
+s3_current_object_expiration_days = 60
+s3_force_destroy = false
+dynamodb_deletion_protection_enabled = true
+
+efs_history_enabled = true
+efs_history_retention_days = 8
+report_efs_aggregate_enabled = true
+report_efs_lookback_hours = 168
+
+alert_ingress_enabled = true
+alert_persist_dynamodb = true
+eventbridge_pipes_enabled = true
+eventbridge_scheduler_enabled = false
+
+scheduler_timezone = "Asia/Shanghai"
+morning_schedule_expression = "cron(0 9 * * ? *)"
+afternoon_schedule_expression = "cron(0 16 * * ? *)"
+weekly_report_schedule_expression = "cron(30 16 ? * TUE *)"
+
+sns_email_subscriptions = ["operator@example.com"]
+
+github_repository = "YOUR_GITHUB_OWNER/openclaw-aws"
+github_cd_branch_patterns = ["main", "release/*"]
+github_environment_names = ["prod"]
+github_oidc_provider_arn = "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
+terraform_state_bucket = "openclaw-aws-terraform-state-000000000000-ap-northeast-1"
+terraform_state_key    = "envs/prod/terraform.tfstate"
+
+additional_ecr_pull_repository_arns = [
+  "arn:aws:ecr:ap-northeast-1:000000000000:repository/openclaw-aws-dev-agent"
+]
+additional_cd_ecr_repository_arns = [
+  "arn:aws:ecr:ap-northeast-1:000000000000:repository/openclaw-aws-dev-agent"
+]
+
+additional_tags = {
+  Purpose = "portfolio-production"
+  Version = "v1"
+}

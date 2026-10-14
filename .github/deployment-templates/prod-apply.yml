@@ -1,0 +1,136 @@
+name: Apply Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_run_id:
+        description: "Run ID from the reviewed Plan Prod workflow"
+        required: true
+        type: string
+      confirmation:
+        description: "Type APPLY-PROD after reviewing prod-plan.txt"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-northeast-1
+  AWS_ACCOUNT_ID: "000000000000"
+  AWS_DEPLOY_ROLE_ARN: arn:aws:iam::000000000000:role/openclaw-aws-prod-deploy-role
+  TF_STATE_BUCKET: openclaw-aws-terraform-state-000000000000-ap-northeast-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+concurrency:
+  group: openclaw-apply-prod
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply exact reviewed prod plan and smoke test
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'APPLY-PROD'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: prod
+    steps:
+      - name: Download reviewed plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: prod-plan-${{ inputs.plan_run_id }}
+          path: ${{ runner.temp }}/reviewed-plan
+          run-id: ${{ inputs.plan_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate plan metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          metadata="${RUNNER_TEMP}/reviewed-plan/metadata.env"
+          [[ -f "${metadata}" ]] || { echo "Missing metadata.env"; exit 1; }
+          source_commit="$(grep -E '^SOURCE_COMMIT=[0-9a-f]{40}$' "${metadata}" | cut -d= -f2)"
+          digest="$(grep -E '^SOURCE_IMAGE_DIGEST=sha256:[0-9a-f]{64}$' "${metadata}" | cut -d= -f2)"
+          schedulers="$(grep -E '^ENABLE_SCHEDULERS=(true|false)$' "${metadata}" | cut -d= -f2)"
+          plan_sha="$(grep -E '^PLAN_SHA256=[0-9a-f]{64}$' "${metadata}" | cut -d= -f2)"
+          run_id="$(grep -E '^PLAN_RUN_ID=[0-9]+$' "${metadata}" | cut -d= -f2)"
+          [[ -n "${source_commit}" && -n "${digest}" && -n "${schedulers}" && -n "${plan_sha}" ]]
+          [[ "${run_id}" == "${{ inputs.plan_run_id }}" ]]
+          echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "schedulers=${schedulers}" >> "${GITHUB_OUTPUT}"
+          echo "plan_sha=${plan_sha}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ steps.metadata.outputs.source_commit }}
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Verify reviewed plan checksum
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "${RUNNER_TEMP}/reviewed-plan"
+          sha256sum --check prod-plan.sha256
+          [[ "$(cut -d' ' -f1 prod-plan.sha256)" == "${{ steps.metadata.outputs.plan_sha }}" ]]
+      - name: Assume approved prod deploy role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: prod-apply-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Apply the exact reviewed plan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          terraform -chdir=infra/envs/prod init -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=envs/prod/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=infra/envs/prod apply -input=false "${RUNNER_TEMP}/reviewed-plan/prod.tfplan"
+      - name: Run prod smoke test
+        env:
+          OPENCLAW_EVIDENCE_ROOT: ${{ runner.temp }}/evidence
+        run: ./infra/scripts/tests/smoke-test.sh prod
+      - name: Verify no immediate drift
+        env:
+          TF_VAR_agent_image_digest: ${{ steps.metadata.outputs.digest }}
+          TF_VAR_agent_image_uri_override: ""
+          TF_VAR_eventbridge_scheduler_enabled: ${{ steps.metadata.outputs.schedulers }}
+        shell: bash
+        run: |
+          set +e
+          terraform -chdir=infra/envs/prod plan -input=false -detailed-exitcode > "${RUNNER_TEMP}/prod-no-drift.txt" 2>&1
+          result=$?
+          set -e
+          [[ ${result} -eq 0 ]] || { cat "${RUNNER_TEMP}/prod-no-drift.txt"; exit 1; }
+      - name: Upload prod evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-deployment-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/reviewed-plan
+            ${{ runner.temp }}/prod-no-drift.txt
+            ${{ runner.temp }}/evidence
+          retention-days: 30
+      - name: Deployment summary
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF_SUMMARY
+          ## prod deployment completed
+          - Reviewed plan run: ${{ inputs.plan_run_id }}
+          - Commit: ${{ steps.metadata.outputs.source_commit }}
+          - Image digest: ${{ steps.metadata.outputs.digest }}
+          - Schedulers enabled: ${{ steps.metadata.outputs.schedulers }}
+          - Apply role: ${AWS_DEPLOY_ROLE_ARN}
+          - Smoke test: completed
+          - Immediate drift: none
+          EOF_SUMMARY

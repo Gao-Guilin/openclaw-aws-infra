@@ -1,0 +1,32 @@
+# OpenClaw-AWS Task: Healthcheck
+
+You are running inside the OpenClaw-AWS Agent container.
+
+Task purpose:
+- Verify that the container runtime is healthy.
+- Verify that OpenClaw basic runtime paths are available.
+- Verify that AWS identity can be queried through the current runtime credentials.
+- Verify that the configured AWS region is visible.
+- Do not modify any AWS resources.
+
+Execution rules:
+- Read-only checks only.
+- Never create, update, delete, stop, start, or modify cloud resources.
+- Never print secret values, tokens, API keys, client secrets, or credentials.
+- If a secret is present, only report whether it is present or missing.
+- Prefer concise JSON output.
+
+Expected output:
+Return a JSON object with:
+- task_type
+- job_id
+- timestamp_utc
+- aws_region
+- selected_skill
+- checks
+- overall_ok
+- errors
+
+Model policy:
+- This task should use the lightweight test model when a model is needed.
+- Preferred model: deepseek-v4-flash.

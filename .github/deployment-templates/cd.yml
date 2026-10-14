@@ -1,0 +1,128 @@
+name: Deploy Dev
+
+on:
+  workflow_run:
+    workflows: ["OpenClaw CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-northeast-1
+  AWS_ACCOUNT_ID: "000000000000"
+  AWS_IMAGE_ROLE_ARN: arn:aws:iam::000000000000:role/openclaw-aws-dev-cd-role
+  AWS_DEPLOY_ROLE_ARN: arn:aws:iam::000000000000:role/openclaw-aws-dev-deploy-role
+  ECR_REPOSITORY: openclaw-aws-dev-agent
+  TF_STATE_BUCKET: openclaw-aws-terraform-state-000000000000-ap-northeast-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+concurrency:
+  group: openclaw-deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, Plan, Apply and Smoke Test dev
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: dev
+    steps:
+      - name: Resolve source commit
+        id: source
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sha=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          fi
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Assume image-delivery role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c
+        with:
+          role-to-assume: ${{ env.AWS_IMAGE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: dev-image-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64
+      - name: Build and push immutable image
+        id: image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag="sha-${{ steps.source.outputs.sha }}"
+          uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${tag}"
+          if ! digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${tag}" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null)"; then
+            docker build --pull --tag "${uri}" ./openclaw-agent
+            docker push "${uri}"
+            digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids "imageTag=${tag}" --query 'imageDetails[0].imageDigest' --output text)"
+          fi
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "image=${uri}@${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Assume approved dev deploy role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: dev-apply-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Terraform plan and apply dev
+        env:
+          TF_VAR_agent_image_digest: ${{ steps.image.outputs.digest }}
+          TF_VAR_agent_image_uri_override: ""
+          TF_VAR_eventbridge_scheduler_enabled: "false"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          terraform -chdir=infra/envs/dev init -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=envs/dev/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=infra/envs/dev plan -input=false -out="${RUNNER_TEMP}/dev.tfplan"
+          terraform -chdir=infra/envs/dev show -no-color "${RUNNER_TEMP}/dev.tfplan" > "${RUNNER_TEMP}/dev-plan.txt"
+          terraform -chdir=infra/envs/dev apply -input=false "${RUNNER_TEMP}/dev.tfplan"
+      - name: Run dev smoke test
+        env:
+          OPENCLAW_EVIDENCE_ROOT: ${{ runner.temp }}/evidence
+        run: ./infra/scripts/tests/smoke-test.sh dev
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-deployment-${{ steps.source.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/dev-plan.txt
+            ${{ runner.temp }}/evidence
+          retention-days: 7
+      - name: Summary
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF_SUMMARY
+          ## dev deployment
+          - Commit: \`${{ steps.source.outputs.sha }}\`
+          - Image digest: \`${{ steps.image.outputs.digest }}\`
+          - Image role: \`${AWS_IMAGE_ROLE_ARN}\`
+          - Apply role: \`${AWS_DEPLOY_ROLE_ARN}\`
+          - Terraform Apply: completed
+          - Smoke test: completed
+          EOF_SUMMARY

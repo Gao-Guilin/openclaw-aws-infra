@@ -1,0 +1,185 @@
+name: Destroy Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Choose plan first, then apply the reviewed plan"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+      plan_run_id:
+        description: "Run ID from the reviewed destroy plan; required for apply"
+        required: false
+        type: string
+      confirmation:
+        description: "Type DESTROY-DEV only for apply"
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-northeast-1
+  AWS_ACCOUNT_ID: "000000000000"
+  AWS_PLAN_ROLE_ARN: arn:aws:iam::000000000000:role/openclaw-aws-dev-plan-role
+  AWS_DEPLOY_ROLE_ARN: arn:aws:iam::000000000000:role/openclaw-aws-dev-deploy-role
+  TF_STATE_BUCKET: openclaw-aws-terraform-state-000000000000-ap-northeast-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+concurrency:
+  group: openclaw-destroy-dev
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Build reviewable dev destroy plan
+    if: github.ref == 'refs/heads/main' && inputs.action == 'plan'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Assume read-only dev Plan role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c
+        with:
+          role-to-assume: ${{ env.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: dev-destroy-plan-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Build destroy plan artifact
+        id: plan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          artifact_dir="${RUNNER_TEMP}/dev-destroy-plan-artifact"
+          mkdir -p "${artifact_dir}"
+          terraform -chdir=infra/envs/dev init -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=envs/dev/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=infra/envs/dev plan -destroy -input=false -out="${artifact_dir}/destroy.tfplan"
+          terraform -chdir=infra/envs/dev show -no-color "${artifact_dir}/destroy.tfplan" > "${artifact_dir}/destroy-plan.txt"
+          (
+            cd "${artifact_dir}"
+            sha256sum destroy.tfplan > destroy-plan.sha256
+          )
+          cat > "${artifact_dir}/metadata.env" <<META
+          SOURCE_COMMIT=${GITHUB_SHA}
+          PLAN_SHA256=$(cut -d' ' -f1 "${artifact_dir}/destroy-plan.sha256")
+          PLAN_RUN_ID=${GITHUB_RUN_ID}
+          META
+          echo "plan_sha256=$(cut -d' ' -f1 "${artifact_dir}/destroy-plan.sha256")" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev-destroy-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/dev-destroy-plan-artifact
+          retention-days: 7
+      - name: Plan summary
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF_SUMMARY
+          ## dev destroy plan ready for manual review
+          - Plan run ID: ${GITHUB_RUN_ID}
+          - Commit: ${GITHUB_SHA}
+          - Plan role: ${AWS_PLAN_ROLE_ARN}
+          - Plan SHA-256: ${{ steps.plan.outputs.plan_sha256 }}
+
+          Download and review dev-destroy-plan-${GITHUB_RUN_ID}/destroy-plan.txt. Only after confirming that shared OIDC and prod resources are absent, run this workflow again with action=apply, this run ID, and confirmation DESTROY-DEV.
+          EOF_SUMMARY
+
+  apply:
+    name: Apply exact reviewed dev destroy plan
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.action == 'apply' &&
+      inputs.confirmation == 'DESTROY-DEV' &&
+      inputs.plan_run_id != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: dev-destroy
+    steps:
+      - name: Download reviewed destroy plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-destroy-plan-${{ inputs.plan_run_id }}
+          path: ${{ runner.temp }}/reviewed-destroy-plan
+          run-id: ${{ inputs.plan_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate destroy plan metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          metadata="${RUNNER_TEMP}/reviewed-destroy-plan/metadata.env"
+          [[ -f "${metadata}" ]] || { echo "Missing metadata.env"; exit 1; }
+          source_commit="$(grep -E '^SOURCE_COMMIT=[0-9a-f]{40}$' "${metadata}" | cut -d= -f2)"
+          plan_sha="$(grep -E '^PLAN_SHA256=[0-9a-f]{64}$' "${metadata}" | cut -d= -f2)"
+          run_id="$(grep -E '^PLAN_RUN_ID=[0-9]+$' "${metadata}" | cut -d= -f2)"
+          [[ -n "${source_commit}" && -n "${plan_sha}" ]]
+          [[ "${run_id}" == "${{ inputs.plan_run_id }}" ]]
+          echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
+          echo "plan_sha=${plan_sha}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ steps.metadata.outputs.source_commit }}
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Verify reviewed destroy plan checksum
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "${RUNNER_TEMP}/reviewed-destroy-plan"
+          sha256sum --check destroy-plan.sha256
+          [[ "$(cut -d' ' -f1 destroy-plan.sha256)" == "${{ steps.metadata.outputs.plan_sha }}" ]]
+      - name: Assume approved dev deploy role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: dev-destroy-apply-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Apply the exact reviewed destroy plan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          terraform -chdir=infra/envs/dev init -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=envs/dev/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=infra/envs/dev apply -input=false "${RUNNER_TEMP}/reviewed-destroy-plan/destroy.tfplan"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dev-destroy-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/reviewed-destroy-plan
+          retention-days: 30
+      - name: Destroy summary
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF_SUMMARY
+          ## dev destroy completed
+          - Reviewed plan run: ${{ inputs.plan_run_id }}
+          - Commit: ${{ steps.metadata.outputs.source_commit }}
+          - Apply role: ${AWS_DEPLOY_ROLE_ARN}
+          - Exact reviewed Plan applied: yes
+          EOF_SUMMARY
